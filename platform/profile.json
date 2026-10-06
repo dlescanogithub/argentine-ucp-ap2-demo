@@ -1,0 +1,64 @@
+{
+  "ucp": {
+    "version": "2026-08-25",
+    "services": {
+      "dev.ucp.shopping": [
+        {
+          "version": "2026-08-25",
+          "spec": "https://ucp.dev/2026-08-25/specification/overview",
+          "transport": "rest",
+          "schema": "https://ucp.dev/2026-08-25/services/shopping/openapi.json"
+        }
+      ]
+    },
+    "capabilities": {
+      "dev.ucp.shopping.checkout": [
+        {
+          "version": "2026-08-25",
+          "spec": "https://ucp.dev/2026-08-25/specification/shopping/checkout",
+          "schema": "https://ucp.dev/2026-08-25/schemas/shopping/checkout.json"
+        }
+      ],
+      "dev.ucp.common.payment.ap2_mandate": [
+        {
+          "version": "2026-08-25",
+          "spec": "https://ucp.dev/2026-08-25/specification/payment/extensions/ap2-mandates",
+          "schema": "https://ucp.dev/2026-08-25/schemas/common/payment_ap2_mandate.json",
+          "extends": "dev.ucp.shopping.checkout",
+          "config": {
+            "vp_formats_supported": {
+              "dc+sd-jwt": {}
+            }
+          }
+        }
+      ]
+    },
+    "payment_handlers": {
+      "com.example.demo_ap2_handler": [
+        {
+          "id": "demo_ap2_lab",
+          "version": "2026-08-25",
+          "spec": "https://example.invalid/demo/ap2-handler",
+          "schema": "https://example.invalid/demo/ap2-handler.json"
+        }
+      ]
+    }
+  },
+  "signing_keys": [
+    {
+      "kid": "argentine-demo-platform-lab-2026",
+      "kty": "EC",
+      "crv": "P-256",
+      "x": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "y": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+      "use": "sig",
+      "alg": "ES256",
+      "_demo_note": "LAB PLACEHOLDER — not a real key; phase-1 shape only"
+    }
+  ],
+  "_demo": {
+    "phase": 1,
+    "money": false,
+    "note": "ArGENTine UCP/AP2 demo platform profile. Not production."
+  }
+}
