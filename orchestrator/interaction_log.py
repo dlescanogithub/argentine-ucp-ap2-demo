@@ -56,6 +56,10 @@ _JWK_COORD_KEYS = {"x", "y", "d", "k"}
 _JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]*)+(?:~[A-Za-z0-9_.-]*)*")
 _EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _BEARER_RE = re.compile(r"(?i)\bBearer\s+\S+")
+# Require ":" or "=" so ordinary prose ("authorization placeholder") stays readable.
+_LABELED_SECRET_RE = re.compile(
+    r"(?i)\b(token|secret|password|api[_-]?key|authorization)\b\s*[:=]\s*\S+"
+)
 _LITERAL_TOKENS = {"success_token", "fail_token"}
 
 PROTOCOL_STEPS = (
@@ -92,14 +96,16 @@ def redact_text(text: str) -> str:
     text = _BEARER_RE.sub("Bearer [redacted]", text)
     text = _JWT_RE.sub("[redacted]", text)
     text = _EMAIL_RE.sub("[redacted-email]", text)
-    if len(text) > 800:
-        text = text[:800] + "…"
+    text = _LABELED_SECRET_RE.sub(lambda match: f"{match.group(1)} [redacted]", text)
+    if len(text) > 1200:
+        text = text[:1200] + "…"
     return text
 
 
 def redact_payload(value: Any, depth: int = 0) -> Any:
     """Return a JSON-safe copy with secrets replaced by ``[redacted]``."""
-    if depth > 6:
+    # UCP profiles nest capabilities → config → vp_formats. Keep that visible.
+    if depth > 12:
         return "…"
     if isinstance(value, dict):
         out: dict[str, Any] = {}
@@ -165,11 +171,16 @@ def select_catalog_item(payload: Any) -> dict[str, Any] | None:
     return None
 
 
+def _shown(value: Any) -> str:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, separators=(", ", ": "))
+    return str(value)
+
+
 def _price_text(price: Any) -> str:
     if isinstance(price, dict):
-        currency = price.get("currency") or ""
-        amount = price.get("value", price.get("amount"))
-        return f"{currency} {amount}".strip()
+        # Keep the merchant's own fields. Do not guess whether "amount" is cents.
+        return _shown(price)
     if price is None:
         return "unpriced"
     return str(price)
@@ -198,22 +209,54 @@ def _endpoint_from_service(value: Any) -> str | None:
     return None
 
 
-def _capability_names(ucp: dict[str, Any]) -> list[str]:
-    caps = ucp.get("capabilities")
-    if isinstance(caps, dict):
-        return sorted(str(name) for name in caps)
-    if isinstance(caps, list):
-        names: list[str] = []
-        for cap in caps:
-            if isinstance(cap, dict) and cap.get("name"):
-                names.append(str(cap["name"]))
-            elif isinstance(cap, str):
-                names.append(cap)
-        return names
-    return []
+def _dedupe(names: list[str]) -> list[str]:
+    seen: list[str] = []
+    for name in names:
+        if name not in seen:
+            seen.append(name)
+    return seen
 
 
-def _handler_ids(ucp: dict[str, Any]) -> list[str]:
+def _capability_names_in(node: Any) -> list[str]:
+    found: list[str] = []
+    if isinstance(node, dict):
+        caps = node.get("capabilities")
+        if isinstance(caps, dict):
+            found.extend(str(name) for name in caps)
+        elif isinstance(caps, list):
+            for cap in caps:
+                if isinstance(cap, dict) and cap.get("name"):
+                    found.append(str(cap["name"]))
+                elif isinstance(cap, str):
+                    found.append(cap)
+        for key, child in node.items():
+            if key == "capabilities":
+                continue
+            if isinstance(child, (dict, list)):
+                found.extend(_capability_names_in(child))
+    elif isinstance(node, list):
+        for child in node:
+            found.extend(_capability_names_in(child))
+    return found
+
+
+def _service_lines(services: Any) -> list[str]:
+    lines: list[str] = []
+    if isinstance(services, dict):
+        for name, value in services.items():
+            endpoint = _endpoint_from_service(value)
+            if endpoint:
+                lines.append(f"{name} at {endpoint}")
+    elif isinstance(services, list):
+        endpoint = _endpoint_from_service(services)
+        if endpoint:
+            lines.append(endpoint)
+    return lines
+
+
+def _handler_ids(profile: dict[str, Any]) -> list[str]:
+    found: list[str] = []
+    ucp = profile.get("ucp") if isinstance(profile.get("ucp"), dict) else {}
     handlers = ucp.get("payment_handlers")
     values: list[Any]
     if isinstance(handlers, dict):
@@ -221,8 +264,7 @@ def _handler_ids(ucp: dict[str, Any]) -> list[str]:
     elif isinstance(handlers, list):
         values = handlers
     else:
-        return []
-    found: list[str] = []
+        values = []
     for value in values:
         seq = value if isinstance(value, list) else [value]
         for entry in seq:
@@ -230,7 +272,13 @@ def _handler_ids(ucp: dict[str, Any]) -> list[str]:
                 found.append(str(entry["id"]))
             elif isinstance(entry, str):
                 found.append(entry)
-    return found
+    payment = profile.get("payment") if isinstance(profile.get("payment"), dict) else {}
+    listed = payment.get("handlers")
+    if isinstance(listed, list):
+        for entry in listed:
+            if isinstance(entry, dict) and entry.get("id"):
+                found.append(str(entry["id"]))
+    return _dedupe(found)
 
 
 def summarize_discovery(profile: Any, http: int) -> str:
@@ -238,13 +286,13 @@ def summarize_discovery(profile: Any, http: int) -> str:
         return f"Discovery HTTP {http} did not return a UCP profile."
     ucp = profile.get("ucp") if isinstance(profile.get("ucp"), dict) else {}
     version = ucp.get("version") or "unknown"
-    caps = _capability_names(ucp)
-    endpoint = _endpoint_from_service(ucp.get("services"))
-    handlers = _handler_ids(ucp)
+    caps = _dedupe(_capability_names_in(ucp))
+    services = _service_lines(ucp.get("services"))
+    handlers = _handler_ids(profile)
     ap2 = any("ap2" in name for name in caps)
     parts = [f"Discovered UCP version {version} (HTTP {http})"]
-    if endpoint:
-        parts.append(f"shopping REST at {endpoint}")
+    if services:
+        parts.append("services: " + "; ".join(services))
     parts.append("capabilities: " + (", ".join(caps) if caps else "none listed"))
     if handlers:
         parts.append("payment handlers: " + ", ".join(handlers))
@@ -281,7 +329,7 @@ def _line_labels(payload: dict[str, Any]) -> list[str]:
         if not isinstance(line, dict):
             continue
         nested = line.get("item") if isinstance(line.get("item"), dict) else {}
-        label = line.get("sku") or line.get("id") or nested.get("id") or nested.get("sku")
+        label = line.get("sku") or nested.get("sku") or nested.get("id") or line.get("id")
         if label:
             labels.append(str(label))
     return labels
@@ -297,7 +345,7 @@ def summarize_checkout_created(payload: Any, http: int) -> str:
         ap2_note = " Merchant returned an AP2 authorization placeholder (redacted in the snippet)."
     return (
         f"Created checkout {payload.get('id')} status {payload.get('status')} (HTTP {http}); "
-        f"items {labels}; totals {payload.get('totals')}.{ap2_note} No charge."
+        f"items {labels}; totals {_shown(payload.get('totals'))}.{ap2_note} No charge."
     )
 
 
@@ -337,7 +385,7 @@ def summarize_ap2_request(meta: dict[str, Any]) -> str:
     return (
         "Decided to attach AP2 lab placeholders only: "
         f"checkout {meta.get('vct_checkout')} and payment {meta.get('vct_payment')} "
-        f"via handler {meta.get('handler_id')}, amount {meta.get('amount')}. "
+        f"via handler {meta.get('handler_id')}, amount {_shown(meta.get('amount'))}. "
         "Fixtures are not verifiable and are not a real mandate. No charge."
     )
 

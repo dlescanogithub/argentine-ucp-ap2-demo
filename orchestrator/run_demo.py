@@ -243,7 +243,7 @@ def gate_health(gate_base: str) -> tuple[int, dict[str, Any]]:
     safe = {"diego_off": body.get("diego_off")} if isinstance(payload, dict) else {"diego_off": None}
     _log_res(
         "gate_health",
-        f"Gate health HTTP {code}; diego_off={safe.get('diego_off')}.",
+        f"Gate health HTTP {code}; diego_off={json.dumps(safe.get('diego_off'))}.",
         code,
         safe,
     )
@@ -305,7 +305,7 @@ def admin_kill_status(gate_base: str, admin_token: str) -> tuple[int, dict[str, 
     }
     _log_res(
         "kill_switch",
-        f"Kill status HTTP {code}; diego_off={safe.get('diego_off')}.",
+        f"Kill status HTTP {code}; diego_off={json.dumps(safe.get('diego_off'))}.",
         code,
         safe,
     )
@@ -336,7 +336,7 @@ def admin_kill_engage(gate_base: str, admin_token: str) -> tuple[int, dict[str, 
     }
     _log_res(
         "kill_switch",
-        f"Kill engage HTTP {code}; diego_off={safe.get('diego_off')}. Clear is not done by this demo.",
+        f"Kill engage HTTP {code}; diego_off={json.dumps(safe.get('diego_off'))}. Clear is not done by this demo.",
         code,
         safe,
     )
