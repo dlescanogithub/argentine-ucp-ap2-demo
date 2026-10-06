@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
-"""Phase-1 orchestrator: local UCP merchant + ArGENTine Railway gate.
+"""Orchestrator: local UCP stub + live hemanth UCP + ArGENTine Railway gate.
 
 Modes:
-  smoke  — local UCP full path + gate brief without HITL → expect NEED_HUMAN
-           (or diego_off if kill is engaged). Documents that live GO needs Diego.
-  demo   — same UCP path + HITL markers for mechanical GO (Diego must open gate).
-  abort  — UCP create + optional pre-gate, then admin engage diego_off, then
-           gated call must see fails:["diego_off"] (no complete).
+  smoke     — local UCP full path + gate brief without HITL → expect NEED_HUMAN
+              (or diego_off if kill is engaged). Documents that live GO needs Diego.
+  demo      — same UCP path + HITL markers for mechanical GO (Diego must open gate).
+  abort     — UCP create + optional pre-gate, then admin engage diego_off, then
+              gated call must see fails:["diego_off"] (no complete).
+  live-ucp  — hemanth live merchant (discovery + Worker API). create→get→complete(mock).
+              Gate stays CLOSED for this smoke (expect 503 diego_off). No Railway open.
+              No real money (mock-payment-handler / success_token only). No AP2 claim.
 
 Secrets (never printed):
   /home/box/secrets/argentine-partner-caller.env
   /home/box/secrets/argentine-admin.env
 
-Does not modify argentine-a2a. Does not deploy. Local merchant only.
+Does not modify argentine-a2a. Does not deploy this stub to Railway.
 """
 
 from __future__ import annotations
@@ -34,6 +37,14 @@ DEFAULT_PARTNER_ENV = Path("/home/box/secrets/argentine-partner-caller.env")
 DEFAULT_ADMIN_ENV = Path("/home/box/secrets/argentine-admin.env")
 DEFAULT_GATE = "https://argentine-a2a-production.up.railway.app"
 AP2_DIR = ROOT / "fixtures" / "ap2"
+
+AP2_DIR = ROOT / "fixtures" / "ap2"
+
+# hemanth/ucp-demo live sandbox (phase 2)
+LIVE_UCP_DISCOVERY = "https://ucp-demo.web.app/.well-known/ucp"
+LIVE_UCP_API = "https://ucp-demo-api.hemanthhm.workers.dev"
+LIVE_UCP_MOCK_HANDLER = "mock-payment-handler"
+LIVE_UCP_FORBIDDEN_HANDLERS = frozenset({"card-handler"})
 
 
 class SecretError(RuntimeError):
@@ -70,7 +81,14 @@ def http_json(
     timeout: float = 20.0,
 ) -> tuple[int, Any]:
     data = None
-    req_headers = {"Accept": "application/json"}
+    # Cloudflare (and many CDNs) ban the default Python-urllib UA (error 1010).
+    req_headers = {
+        "Accept": "application/json",
+        "User-Agent": (
+            "ArgentineUcpAp2Demo/0.2 (+https://github.com/dlescanogithub/argentine-ucp-ap2-demo; "
+            "research-smoke; compatible)"
+        ),
+    }
     if headers:
         req_headers.update(headers)
     if body is not None:
@@ -469,9 +487,286 @@ def run_abort(args: argparse.Namespace, partner: dict[str, str], admin: dict[str
     return 0 if ok else 1
 
 
+
+def _live_ucp_headers(idem: str | None = None) -> dict[str, str]:
+    h = {
+        "UCP-Agent": f'profile="{LIVE_UCP_DISCOVERY}"',
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (compatible; ArgentineUcpAp2Demo/0.2; +https://github.com/dlescanogithub/argentine-ucp-ap2-demo)",
+    }
+    if idem:
+        h["Idempotency-Key"] = idem
+    return h
+
+
+def _assert_mock_only(instruments: list[Any] | None) -> None:
+    for inst in instruments or []:
+        if not isinstance(inst, dict):
+            continue
+        hid = str(inst.get("handler_id") or "")
+        if hid in LIVE_UCP_FORBIDDEN_HANDLERS or hid.startswith("card"):
+            raise RuntimeError(f"refusing non-mock payment handler: {hid}")
+
+
+def run_live_ucp(args: argparse.Namespace, partner: dict[str, str]) -> int:
+    """Phase-2 smoke against hemanth live UCP. Gate CLOSED expected (503 diego_off)."""
+    emit(
+        "mode",
+        mode="live-ucp",
+        discovery=LIVE_UCP_DISCOVERY,
+        api=LIVE_UCP_API,
+        note=(
+            "Gate must stay CLOSED for this smoke (expect 503 diego_off). "
+            "GO needs a later Diego-approved open window. "
+            "No AP2 claim (merchant has no ap2_mandate). "
+            "Mock payment only; Worker get/cancel/complete may 404 (in-memory Map across isolates)."
+        ),
+        ap2=False,
+    )
+
+    # 1) Discovery (Firebase + Worker)
+    code, disc = http_json("GET", LIVE_UCP_DISCOVERY)
+    shopping = None
+    if isinstance(disc, dict):
+        shopping = ((disc.get("ucp") or {}).get("services") or {}).get("dev.ucp.shopping")
+    rest_ep = None
+    if isinstance(shopping, dict):
+        rest_ep = ((shopping.get("rest") or {}).get("endpoint"))
+    emit(
+        "live_ucp_discover",
+        http=code,
+        version=(disc or {}).get("ucp", {}).get("version") if isinstance(disc, dict) else None,
+        rest_endpoint=rest_ep,
+        has_ap2_mandate=False,
+    )
+    if code != 200:
+        emit("live_ucp_fail", reason="discovery_failed", http=code)
+        return 1
+
+    w_code, w_disc = http_json("GET", f"{LIVE_UCP_API}/.well-known/ucp")
+    emit("live_ucp_worker_discover", http=w_code, version=((w_disc or {}).get("ucp") or {}).get("version") if isinstance(w_disc, dict) else None)
+    h_code, health_api = http_json("GET", f"{LIVE_UCP_API}/health")
+    emit("live_ucp_api_health", http=h_code, body=health_api if isinstance(health_api, dict) else None)
+
+    # 2) Catalog → pick in-stock SKU
+    c_code, catalog = http_json(
+        "POST",
+        f"{LIVE_UCP_API}/api/catalog/search",
+        headers=_live_ucp_headers(),
+        body={"query": "", "limit": 10, "filters": {"availability": "in_stock"}},
+    )
+    items = (catalog or {}).get("items") if isinstance(catalog, dict) else None
+    if not isinstance(items, list):
+        items = []
+    sku = None
+    product_name = None
+    price = None
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        if it.get("availability") == "out_of_stock":
+            continue
+        sku = it.get("id")
+        product_name = it.get("name")
+        price = it.get("price")
+        break
+    emit(
+        "live_ucp_catalog",
+        http=c_code,
+        count=len(items),
+        sku=sku,
+        product_name=product_name,
+        price=price,
+    )
+    if c_code != 200 or not sku:
+        emit("live_ucp_fail", reason="catalog_or_sku_missing")
+        return 1
+
+    # 3) Create checkout
+    idem = f"argentine-live-ucp-{int(time.time())}"
+    cr_code, created = http_json(
+        "POST",
+        f"{LIVE_UCP_API}/api/shopping/checkout-sessions",
+        headers=_live_ucp_headers(idem),
+        body={"line_items": [{"item": {"id": sku}, "quantity": 1}]},
+    )
+    checkout_id = created.get("id") if isinstance(created, dict) else None
+    instruments = None
+    if isinstance(created, dict):
+        instruments = ((created.get("payment") or {}).get("instruments"))
+    try:
+        _assert_mock_only(instruments if isinstance(instruments, list) else [])
+    except RuntimeError as exc:
+        emit("live_ucp_fail", reason=str(exc))
+        return 1
+    emit(
+        "live_ucp_create",
+        http=cr_code,
+        id=checkout_id,
+        status=created.get("status") if isinstance(created, dict) else None,
+        totals=created.get("totals") if isinstance(created, dict) else None,
+        line_item_ids=[
+            (li.get("item") or {}).get("id")
+            for li in (created.get("line_items") or [])
+            if isinstance(li, dict)
+        ]
+        if isinstance(created, dict)
+        else [],
+        mock_handlers=[
+            i.get("handler_id")
+            for i in (instruments or [])
+            if isinstance(i, dict)
+        ],
+    )
+    if cr_code not in {200, 201} or not checkout_id:
+        emit("live_ucp_fail", reason="create_failed")
+        return 1
+
+    # 4) GET with retries (known flaky on CF Worker in-memory Map)
+    got = None
+    g_code = 0
+    get_ok = False
+    for attempt in range(1, 9):
+        g_code, got = http_json("GET", f"{LIVE_UCP_API}/api/shopping/checkout-sessions/{checkout_id}")
+        emit("live_ucp_get_attempt", attempt=attempt, http=g_code, id=checkout_id)
+        if g_code == 200 and isinstance(got, dict) and got.get("id") == checkout_id:
+            get_ok = True
+            break
+        time.sleep(0.2)
+    emit(
+        "live_ucp_get",
+        http=g_code,
+        ok=get_ok,
+        flaky_note="Worker uses in-memory Map; create/get often hit different isolates → 404",
+    )
+
+    complete_ok = False
+    complete_http = None
+    order_id = None
+    if get_ok:
+        # Select mock instrument only (never card-handler)
+        put_code, updated = http_json(
+            "PUT",
+            f"{LIVE_UCP_API}/api/shopping/checkout-sessions/{checkout_id}",
+            headers=_live_ucp_headers(),
+            body={
+                "payment": {
+                    "selected_instrument_id": "mock-instrument-1",
+                    "instruments": [
+                        {
+                            "id": "mock-instrument-1",
+                            "handler_id": LIVE_UCP_MOCK_HANDLER,
+                            "type": "token",
+                            "display_name": "Test Payment",
+                        }
+                    ],
+                }
+            },
+        )
+        emit(
+            "live_ucp_select_mock",
+            http=put_code,
+            status=updated.get("status") if isinstance(updated, dict) else None,
+        )
+        # Complete with success_token only (mock path; fail_token would decline)
+        co_code, completed = http_json(
+            "POST",
+            f"{LIVE_UCP_API}/api/shopping/checkout-sessions/{checkout_id}/complete",
+            headers=_live_ucp_headers(),
+            body={"payment_data": {"token": "success_token"}},
+        )
+        complete_http = co_code
+        if isinstance(completed, dict):
+            order_id = ((completed.get("order") or {}) or {}).get("id")
+            complete_ok = co_code == 200 and completed.get("status") == "completed"
+        emit(
+            "live_ucp_complete",
+            http=co_code,
+            ok=complete_ok,
+            status=completed.get("status") if isinstance(completed, dict) else None,
+            order_id=order_id,
+            money=False,
+            handler=LIVE_UCP_MOCK_HANDLER,
+        )
+    else:
+        # Still attempt complete once to document 404 flaky; never card handler
+        co_code, completed = http_json(
+            "POST",
+            f"{LIVE_UCP_API}/api/shopping/checkout-sessions/{checkout_id}/complete",
+            headers=_live_ucp_headers(),
+            body={"payment_data": {"token": "success_token"}},
+        )
+        complete_http = co_code
+        emit(
+            "live_ucp_complete",
+            http=co_code,
+            ok=False,
+            skipped_ready_check=True,
+            error=(completed or {}).get("error") if isinstance(completed, dict) else None,
+            note="get flaky → complete almost always 404 on this Worker; create body still proves merchant path",
+            money=False,
+        )
+
+    # 5) Gate CLOSED smoke — do NOT open Railway
+    gate_base = partner.get("ARGENTINE_GATE_URL", DEFAULT_GATE).rstrip("/")
+    if gate_base.endswith("/v1/gate"):
+        gate_base = gate_base[: -len("/v1/gate")]
+    token = partner.get("ARGENTINE_CALLER_TOKEN", "")
+    if partner.get("ARGENTINE_CALLER_ID") != "partner" or not token:
+        emit("refuse", reason="partner credentials missing or wrong id")
+        return 2
+
+    gh_code, ghealth = gate_health(gate_base)
+    emit(
+        "gate_health",
+        http=gh_code,
+        diego_off=ghealth.get("diego_off"),
+        endpoint=_redact_url(gate_base),
+        expect_closed=True,
+    )
+    # Closed-gate smoke: NEED_HUMAN-shaped brief; diego_off should win with 503 first.
+    g_code, g_body = call_gate(gate_base, token, brief_need_human(str(checkout_id)), "high")
+    emit(
+        "gate_call",
+        case="live_ucp_closed_gate",
+        http=g_code,
+        decision=g_body.get("decision"),
+        fails=g_body.get("fails"),
+        note="Expected 503 diego_off while kill engaged. GO requires a later open window + HITL.",
+    )
+
+    gate_ok = (
+        g_code == 503
+        and g_body.get("decision") == "NO_GO"
+        and isinstance(g_body.get("fails"), list)
+        and "diego_off" in g_body["fails"]
+    )
+    merchant_ok = cr_code in {200, 201} and bool(checkout_id) and bool(sku)
+    emit(
+        "live_ucp_summary",
+        merchant_ok=merchant_ok,
+        sku=sku,
+        product_name=product_name,
+        checkout_id=checkout_id,
+        get_ok=get_ok,
+        complete_ok=complete_ok,
+        complete_http=complete_http,
+        order_id=order_id,
+        gate_ok=gate_ok,
+        gate_http=g_code,
+        ap2=False,
+        money=False,
+        note=(
+            "Smoke OK if merchant create+catalog work and gate returns diego_off. "
+            "get/complete may be flaky (documented). Live GO = later open window, not this mode."
+        ),
+    )
+    return 0 if merchant_ok and gate_ok else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="ArGENTine UCP/AP2 phase-1 orchestrator")
-    p.add_argument("mode", choices=["smoke", "demo", "abort"])
+    p.add_argument("mode", choices=["smoke", "demo", "abort", "live-ucp"])
     p.add_argument("--merchant-host", default="127.0.0.1")
     p.add_argument("--merchant-port", type=int, default=9871)
     p.add_argument("--merchant-url", default="", help="Use existing merchant; do not spawn")
@@ -487,6 +782,9 @@ def main(argv: list[str] | None = None) -> int:
 
     proc = None
     try:
+        if args.mode == "live-ucp":
+            return run_live_ucp(args, partner)
+
         if args.merchant_url:
             merchant_base = args.merchant_url.rstrip("/")
             code, _ = http_json("GET", f"{merchant_base}/health")
