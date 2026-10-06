@@ -16,13 +16,19 @@ Secrets (never printed):
   /home/box/secrets/argentine-admin.env
 
 Does not modify argentine-a2a. Does not deploy this stub to Railway.
+
+After each run, writes a redacted interaction report (no extra flag):
+  reports/latest.md     presenter narrative
+  reports/latest.json   same entries as JSON
+  logs/latest.jsonl     one interaction entry per line
+Timestamped copies sit beside latest.*. Tokens, mandates, and signing keys
+are redacted. Logging does not open the gate or clear the kill switch.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import subprocess
 import sys
 import time
@@ -32,12 +38,35 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+try:
+    from interaction_log import (
+        InteractionLog,
+        select_catalog_item,
+        summarize_ap2_request,
+        summarize_ap2_response,
+        summarize_catalog,
+        summarize_checkout_created,
+        summarize_checkout_get,
+        summarize_complete,
+        summarize_discovery,
+    )
+except ImportError:  # `python -m orchestrator.run_demo`
+    from orchestrator.interaction_log import (
+        InteractionLog,
+        select_catalog_item,
+        summarize_ap2_request,
+        summarize_ap2_response,
+        summarize_catalog,
+        summarize_checkout_created,
+        summarize_checkout_get,
+        summarize_complete,
+        summarize_discovery,
+    )
+
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PARTNER_ENV = Path("/home/box/secrets/argentine-partner-caller.env")
 DEFAULT_ADMIN_ENV = Path("/home/box/secrets/argentine-admin.env")
 DEFAULT_GATE = "https://argentine-a2a-production.up.railway.app"
-AP2_DIR = ROOT / "fixtures" / "ap2"
-
 AP2_DIR = ROOT / "fixtures" / "ap2"
 
 # hemanth/ucp-demo live sandbox (phase 2)
@@ -119,6 +148,41 @@ def emit(event: str, **fields: Any) -> None:
     print(json.dumps(row, ensure_ascii=False), flush=True)
 
 
+_INTERACTION: InteractionLog | None = None
+
+
+def _log_req(step: str, method: str, url: str, summary: str, body: Any = None) -> None:
+    if _INTERACTION is None:
+        return
+    payload: dict[str, Any] = {"method": method, "url": _redact_url(url)}
+    if body is not None:
+        payload["body"] = body
+    _INTERACTION.record(
+        step=step,
+        direction="request",
+        summary=summary,
+        status=None,
+        payload=payload,
+    )
+
+
+def _log_res(step: str, summary: str, status: int | None, payload: Any) -> None:
+    if _INTERACTION is None:
+        return
+    _INTERACTION.record(
+        step=step,
+        direction="response",
+        summary=summary,
+        status=status,
+        payload=payload,
+    )
+
+
+def _note(text: str) -> None:
+    if _INTERACTION is not None:
+        _INTERACTION.set_result(text)
+
+
 def start_merchant(host: str, port: int) -> subprocess.Popen:
     cmd = [sys.executable, str(ROOT / "merchant" / "server.py"), "--host", host, "--port", str(port)]
     proc = subprocess.Popen(
@@ -129,6 +193,7 @@ def start_merchant(host: str, port: int) -> subprocess.Popen:
         text=True,
     )
     base = f"http://{host}:{port}"
+    _log_req("merchant", "GET", f"{base}/health", "Start the local UCP stub and wait until /health responds.")
     deadline = time.time() + 8
     last_err = None
     while time.time() < deadline:
@@ -139,11 +204,23 @@ def start_merchant(host: str, port: int) -> subprocess.Popen:
             code, _ = http_json("GET", f"{base}/health", timeout=1.5)
             if code == 200:
                 emit("merchant_ready", url=base)
+                _log_res(
+                    "merchant",
+                    f"Local stub merchant is ready at {base}. Money is false.",
+                    200,
+                    {"url": base, "money": False},
+                )
                 return proc
         except Exception as exc:  # noqa: BLE001
             last_err = exc
             time.sleep(0.15)
     proc.terminate()
+    _log_res(
+        "merchant",
+        f"Local stub merchant did not become ready: {last_err}",
+        None,
+        {"url": base},
+    )
     raise RuntimeError(f"merchant did not become ready: {last_err}")
 
 
@@ -159,12 +236,28 @@ def stop_merchant(proc: subprocess.Popen | None) -> None:
 
 
 def gate_health(gate_base: str) -> tuple[int, dict[str, Any]]:
-    code, payload = http_json("GET", f"{gate_base.rstrip('/')}/health")
-    return code, payload if isinstance(payload, dict) else {"_payload": payload}
+    url = f"{gate_base.rstrip('/')}/health"
+    _log_req("gate_health", "GET", url, "Check whether the ArGENTine gate is open (diego_off).")
+    code, payload = http_json("GET", url)
+    body = payload if isinstance(payload, dict) else {"_payload": payload}
+    safe = {"diego_off": body.get("diego_off")} if isinstance(payload, dict) else {"diego_off": None}
+    _log_res(
+        "gate_health",
+        f"Gate health HTTP {code}; diego_off={safe.get('diego_off')}.",
+        code,
+        safe,
+    )
+    return code, body
 
 
 def call_gate(gate_base: str, token: str, brief: str, blast_class: str) -> tuple[int, dict[str, Any]]:
     url = f"{gate_base.rstrip('/')}/v1/gate"
+    _log_req(
+        "gate",
+        "POST",
+        url,
+        "Ask the ArGENTine gate for a decision. The brief and caller credential are not stored in the report.",
+    )
     code, payload = http_json(
         "POST",
         url,
@@ -185,13 +278,21 @@ def call_gate(gate_base: str, token: str, brief: str, blast_class: str) -> tuple
     }
     if "error" in payload:
         safe["error"] = payload.get("error")
+    _log_res(
+        "gate",
+        f"Gate HTTP {code}; decision {safe.get('decision')}; fails {safe.get('fails')}.",
+        code,
+        safe,
+    )
     return code, safe
 
 
 def admin_kill_status(gate_base: str, admin_token: str) -> tuple[int, dict[str, Any]]:
+    url = f"{gate_base.rstrip('/')}/admin/kill"
+    _log_req("kill_switch", "GET", url, "Read the Diego off-switch. The admin credential is not stored.")
     code, payload = http_json(
         "GET",
-        f"{gate_base.rstrip('/')}/admin/kill",
+        url,
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     if not isinstance(payload, dict):
@@ -202,13 +303,27 @@ def admin_kill_status(gate_base: str, admin_token: str) -> tuple[int, dict[str, 
         for k in ("diego_off", "env_off", "file_off", "changed_at", "last_kill_pass_at", "server_time", "error")
         if k in payload or k == "error" and "error" in payload
     }
+    _log_res(
+        "kill_switch",
+        f"Kill status HTTP {code}; diego_off={safe.get('diego_off')}.",
+        code,
+        safe,
+    )
     return code, safe
 
 
 def admin_kill_engage(gate_base: str, admin_token: str) -> tuple[int, dict[str, Any]]:
+    url = f"{gate_base.rstrip('/')}/admin/kill"
+    _log_req(
+        "kill_switch",
+        "POST",
+        url,
+        "Engage the Diego off-switch (off=true). This demo never clears the kill.",
+        body={"off": True},
+    )
     code, payload = http_json(
         "POST",
-        f"{gate_base.rstrip('/')}/admin/kill",
+        url,
         headers={"Authorization": f"Bearer {admin_token}"},
         body={"off": True},
     )
@@ -219,6 +334,12 @@ def admin_kill_engage(gate_base: str, admin_token: str) -> tuple[int, dict[str, 
         for k in ("diego_off", "env_off", "file_off", "changed_at", "last_kill_pass_at", "server_time", "error")
         if k in payload or k == "error" and "error" in payload
     }
+    _log_res(
+        "kill_switch",
+        f"Kill engage HTTP {code}; diego_off={safe.get('diego_off')}. Clear is not done by this demo.",
+        code,
+        safe,
+    )
     return code, safe
 
 
@@ -246,22 +367,56 @@ def brief_hitl_go(checkout_id: str) -> str:
 
 
 def ucp_discover(merchant_base: str) -> None:
-    code, profile = http_json("GET", f"{merchant_base}/.well-known/ucp")
+    url = f"{merchant_base}/.well-known/ucp"
+    _log_req(
+        "discovery",
+        "GET",
+        url,
+        "GET /.well-known/ucp for version, services, capabilities, and payment handlers.",
+    )
+    code, profile = http_json("GET", url)
     emit(
         "ucp_discover",
         http=code,
         version=(profile or {}).get("ucp", {}).get("version") if isinstance(profile, dict) else None,
     )
+    _log_res("discovery", summarize_discovery(profile, code), code, profile)
     if code != 200:
         raise RuntimeError("ucp discovery failed")
 
 
-def ucp_create(merchant_base: str) -> dict[str, Any]:
+def ucp_catalog(merchant_base: str) -> dict[str, Any]:
+    url = f"{merchant_base}/ucp/v1/products"
+    _log_req("catalog", "GET", url, "GET the merchant catalog and pick an in-stock product.")
+    code, catalog = http_json("GET", url)
+    chosen = select_catalog_item(catalog)
+    sku = None
+    name = None
+    if isinstance(chosen, dict):
+        sku = chosen.get("sku") or chosen.get("id")
+        name = chosen.get("name") or chosen.get("title")
+    emit("ucp_catalog", http=code, sku=sku, name=name)
+    _log_res("catalog", summarize_catalog(catalog, code), code, catalog)
+    if code != 200 or not isinstance(chosen, dict) or not sku:
+        raise RuntimeError("catalog failed")
+    return chosen
+
+
+def ucp_create(merchant_base: str, sku: str = "demo-sticker") -> dict[str, Any]:
+    url = f"{merchant_base}/ucp/v1/checkout-sessions"
+    body = {"line_items": [{"sku": sku, "quantity": 1}]}
+    _log_req(
+        "checkout_create",
+        "POST",
+        url,
+        f"Create a checkout for sku {sku}, quantity 1. Mock only — no charge.",
+        body=body,
+    )
     code, created = http_json(
         "POST",
-        f"{merchant_base}/ucp/v1/checkout-sessions",
+        url,
         headers={"UCP-Agent": f'profile="{merchant_base}/platform/profile.json"'},
-        body={"line_items": [{"sku": "demo-sticker", "quantity": 1}]},
+        body=body,
     )
     emit(
         "ucp_create_checkout",
@@ -274,54 +429,119 @@ def ucp_create(merchant_base: str) -> dict[str, Any]:
             and created["ap2"].get("merchant_authorization")
         ),
     )
+    _log_res("checkout_create", summarize_checkout_created(created, code), code, created)
     if code not in {200, 201} or not isinstance(created, dict):
         raise RuntimeError("create_checkout failed")
     checkout_id = created["id"]
-    code, got = http_json("GET", f"{merchant_base}/ucp/v1/checkout-sessions/{checkout_id}")
+    get_url = f"{merchant_base}/ucp/v1/checkout-sessions/{checkout_id}"
+    _log_req("checkout_get", "GET", get_url, f"Read checkout {checkout_id} back from the merchant.")
+    code, got = http_json("GET", get_url)
     emit("ucp_get_checkout", http=code, status=(got or {}).get("status") if isinstance(got, dict) else None)
-    return {"checkout_id": checkout_id, "created": created}
+    _log_res("checkout_get", summarize_checkout_get(got, code), code, got)
+    return {"checkout_id": checkout_id, "created": created, "sku": sku}
 
 
 def ucp_complete(merchant_base: str, checkout_id: str) -> tuple[int, dict[str, Any]]:
+    meta_raw = json.loads((AP2_DIR / "mandates.meta.json").read_text(encoding="utf-8"))
+    meta = meta_raw if isinstance(meta_raw, dict) else {}
     checkout_mandate = (AP2_DIR / "checkout_mandate.placeholder.txt").read_text(encoding="utf-8").strip()
     payment_mandate = (AP2_DIR / "payment_mandate.placeholder.txt").read_text(encoding="utf-8").strip()
-    code, completed = http_json(
+    url = f"{merchant_base}/ucp/v1/checkout-sessions/{checkout_id}/complete"
+    _log_req(
+        "ap2_mandate",
         "POST",
-        f"{merchant_base}/ucp/v1/checkout-sessions/{checkout_id}/complete",
+        url,
+        summarize_ap2_request(meta),
         body={
-            "ap2": {"checkout_mandate": checkout_mandate},
-            "payment": {
-                "instruments": [
-                    {
-                        "id": "pm_demo_lab",
-                        "handler_id": "demo_ap2_lab",
-                        "type": "card",
-                        "selected": True,
-                        "display": {"brand": "demo", "last_digits": "0000"},
-                        "credential": {"type": "ap2_payment_mandate", "token": payment_mandate},
-                    }
-                ]
-            },
+            "source": "fixtures/ap2",
+            "verifiable": meta.get("verifiable"),
+            "money": False,
+            "vct_checkout": meta.get("vct_checkout"),
+            "vct_payment": meta.get("vct_payment"),
+            "handler_id": meta.get("handler_id"),
+            "amount": meta.get("amount"),
+            "checkout_mandate_present": bool(checkout_mandate),
+            "payment_mandate_present": bool(payment_mandate),
         },
     )
+    complete_body = {
+        "ap2": {"checkout_mandate": checkout_mandate},
+        "payment": {
+            "instruments": [
+                {
+                    "id": "pm_demo_lab",
+                    "handler_id": "demo_ap2_lab",
+                    "type": "card",
+                    "selected": True,
+                    "display": {"brand": "demo", "last_digits": "0000"},
+                    "credential": {"type": "ap2_payment_mandate", "token": payment_mandate},
+                }
+            ]
+        },
+    }
+    _log_req(
+        "checkout_complete",
+        "POST",
+        url,
+        "POST mock complete with the lab AP2 instrument. No card charge.",
+        body=complete_body,
+    )
+    code, completed = http_json("POST", url, body=complete_body)
+    completed_body = completed if isinstance(completed, dict) else {}
     emit(
         "ucp_complete_checkout",
         http=code,
-        status=(completed or {}).get("status") if isinstance(completed, dict) else None,
-        order_id=((completed or {}).get("order", {}) or {}).get("id") if isinstance(completed, dict) else None,
+        status=completed_body.get("status"),
+        order_id=(completed_body.get("order") or {}).get("id") if isinstance(completed_body.get("order"), dict) else None,
         money=False,
     )
-    return code, completed if isinstance(completed, dict) else {}
+    _log_res("checkout_complete", summarize_complete(completed_body, code), code, completed_body)
+    order = completed_body.get("order") if isinstance(completed_body.get("order"), dict) else {}
+    _log_res(
+        "ap2_mandate",
+        summarize_ap2_response(completed_body, code),
+        code,
+        {
+            "ap2": completed_body.get("ap2"),
+            "order": {
+                "id": order.get("id"),
+                "status": order.get("status"),
+                "amount": order.get("amount"),
+            },
+        },
+    )
+    return code, completed_body
 
 
 def ucp_cancel(merchant_base: str, checkout_id: str) -> tuple[int, dict[str, Any]]:
-    code, cancelled = http_json("POST", f"{merchant_base}/ucp/v1/checkout-sessions/{checkout_id}/cancel")
+    url = f"{merchant_base}/ucp/v1/checkout-sessions/{checkout_id}/cancel"
+    _log_req(
+        "checkout_cancel",
+        "POST",
+        url,
+        f"Cancel checkout {checkout_id} instead of completing it. No charge.",
+    )
+    code, cancelled = http_json("POST", url)
+    cancelled_body = cancelled if isinstance(cancelled, dict) else {}
     emit(
         "ucp_cancel_checkout",
         http=code,
-        status=(cancelled or {}).get("status") if isinstance(cancelled, dict) else None,
+        status=cancelled_body.get("status"),
     )
-    return code, cancelled if isinstance(cancelled, dict) else {}
+    _log_res(
+        "checkout_cancel",
+        f"Cancel HTTP {code}; status {cancelled_body.get('status')}. No charge.",
+        code,
+        cancelled_body,
+    )
+    return code, cancelled_body
+
+
+def _local_checkout(merchant_base: str) -> dict[str, Any]:
+    ucp_discover(merchant_base)
+    chosen = ucp_catalog(merchant_base)
+    sku = str(chosen.get("sku") or chosen.get("id"))
+    return ucp_create(merchant_base, sku)
 
 
 def run_smoke(args: argparse.Namespace, partner: dict[str, str], merchant_base: str) -> int:
@@ -330,8 +550,7 @@ def run_smoke(args: argparse.Namespace, partner: dict[str, str], merchant_base: 
         mode="smoke",
         note="Automated smoke expects NEED_HUMAN (no HITL). Live GO needs Diego approve + gate open.",
     )
-    ucp_discover(merchant_base)
-    local = ucp_create(merchant_base)
+    local = _local_checkout(merchant_base)
     checkout_id = local["checkout_id"]
 
     gate_base = partner.get("ARGENTINE_GATE_URL", DEFAULT_GATE).rstrip("/")
@@ -341,9 +560,11 @@ def run_smoke(args: argparse.Namespace, partner: dict[str, str], merchant_base: 
     caller_id = partner.get("ARGENTINE_CALLER_ID", "")
     if caller_id != "partner":
         emit("refuse", reason="expected ARGENTINE_CALLER_ID=partner")
+        _note("Refused: expected caller id partner. No charge.")
         return 2
     if not token:
         emit("refuse", reason="empty partner token")
+        _note("Refused: empty partner token. No charge.")
         return 2
 
     h_code, health = gate_health(gate_base)
@@ -367,6 +588,10 @@ def run_smoke(args: argparse.Namespace, partner: dict[str, str], merchant_base: 
     )
     ok_local = c_http == 200
     ok_gate = g_code in {200, 503, 429, 401} and g_body.get("decision") in {"NEED_HUMAN", "NO_GO", "GO"}
+    _note(
+        f"Local mock complete HTTP {c_http}. Gate decision {g_body.get('decision')} "
+        f"fails {g_body.get('fails')}. Smoke does not require GO. No real charge."
+    )
     return 0 if ok_local and ok_gate else 1
 
 
@@ -376,8 +601,7 @@ def run_demo(args: argparse.Namespace, partner: dict[str, str], merchant_base: s
         mode="demo",
         note="HITL markers included for mechanical GO. Diego must open gate; prefer real approve in live show.",
     )
-    ucp_discover(merchant_base)
-    local = ucp_create(merchant_base)
+    local = _local_checkout(merchant_base)
     checkout_id = local["checkout_id"]
 
     gate_base = partner.get("ARGENTINE_GATE_URL", DEFAULT_GATE).rstrip("/")
@@ -386,6 +610,7 @@ def run_demo(args: argparse.Namespace, partner: dict[str, str], merchant_base: s
     token = partner.get("ARGENTINE_CALLER_TOKEN", "")
     if partner.get("ARGENTINE_CALLER_ID") != "partner" or not token:
         emit("refuse", reason="partner credentials missing or wrong id")
+        _note("Refused: partner credentials missing or wrong id. No charge.")
         return 2
 
     h_code, health = gate_health(gate_base)
@@ -395,6 +620,7 @@ def run_demo(args: argparse.Namespace, partner: dict[str, str], merchant_base: s
             "demo_blocked",
             reason="gate diego_off=true; open kill before demo GO; abort mode still works",
         )
+        _note("Gate is closed (diego_off). Discovery and checkout were recorded; mock complete was not called. No charge.")
         return 3
 
     brief = brief_hitl_go(checkout_id)
@@ -404,10 +630,18 @@ def run_demo(args: argparse.Namespace, partner: dict[str, str], merchant_base: s
     if g_body.get("decision") != "GO":
         emit("demo_incomplete", reason="gate did not GO; not completing as happy path")
         ucp_cancel(merchant_base, checkout_id)
+        _note(
+            f"Gate decision was {g_body.get('decision')} (fails {g_body.get('fails')}). "
+            "Checkout cancelled. No charge."
+        )
         return 1
 
     c_http, _completed = ucp_complete(merchant_base, checkout_id)
     emit("demo_summary", gate="GO", local_complete_http=c_http, money=False)
+    if c_http == 200:
+        _note("Gate returned GO. Mock checkout completed with AP2 lab placeholders. No real charge.")
+    else:
+        _note(f"Gate returned GO but mock complete HTTP was {c_http}. No real charge.")
     return 0 if c_http == 200 else 1
 
 
@@ -417,8 +651,7 @@ def run_abort(args: argparse.Namespace, partner: dict[str, str], admin: dict[str
         mode="abort",
         note="Engage diego_off via admin AFTER a gated call would be next; show 503 diego_off; no complete.",
     )
-    ucp_discover(merchant_base)
-    local = ucp_create(merchant_base)
+    local = _local_checkout(merchant_base)
     checkout_id = local["checkout_id"]
 
     gate_base = partner.get("ARGENTINE_GATE_URL", DEFAULT_GATE).rstrip("/")
@@ -428,9 +661,11 @@ def run_abort(args: argparse.Namespace, partner: dict[str, str], admin: dict[str
     admin_token = admin.get("ARGENTINE_ADMIN_TOKEN", "")
     if partner.get("ARGENTINE_CALLER_ID") != "partner" or not token:
         emit("refuse", reason="partner credentials missing or wrong id")
+        _note("Refused: partner credentials missing or wrong id. No charge.")
         return 2
     if not admin_token:
         emit("refuse", reason="empty admin token")
+        _note("Refused: empty admin token. No charge.")
         return 2
 
     h_code, health = gate_health(gate_base)
@@ -484,6 +719,10 @@ def run_abort(args: argparse.Namespace, partner: dict[str, str], admin: dict[str
         and "diego_off" in g2_body["fails"]
     )
     emit("abort_summary", ok=ok, money=False, complete=False)
+    if ok:
+        _note("Kill engaged. Next gated call refused. Checkout cancelled instead of completed. No charge.")
+    else:
+        _note("Abort path did not observe the expected diego_off refusal. Complete was still skipped. No charge.")
     return 0 if ok else 1
 
 
@@ -525,6 +764,12 @@ def run_live_ucp(args: argparse.Namespace, partner: dict[str, str]) -> int:
     )
 
     # 1) Discovery (Firebase + Worker)
+    _log_req(
+        "discovery",
+        "GET",
+        LIVE_UCP_DISCOVERY,
+        "GET /.well-known/ucp on the live hemanth merchant.",
+    )
     code, disc = http_json("GET", LIVE_UCP_DISCOVERY)
     shopping = None
     if isinstance(disc, dict):
@@ -539,21 +784,37 @@ def run_live_ucp(args: argparse.Namespace, partner: dict[str, str]) -> int:
         rest_endpoint=rest_ep,
         has_ap2_mandate=False,
     )
+    _log_res("discovery", summarize_discovery(disc, code), code, disc)
     if code != 200:
         emit("live_ucp_fail", reason="discovery_failed", http=code)
+        _note(f"Stopped after discovery HTTP {code}. Gate was not opened. No charge.")
         return 1
 
-    w_code, w_disc = http_json("GET", f"{LIVE_UCP_API}/.well-known/ucp")
+    worker_url = f"{LIVE_UCP_API}/.well-known/ucp"
+    _log_req("discovery_worker", "GET", worker_url, "GET the Worker copy of /.well-known/ucp.")
+    w_code, w_disc = http_json("GET", worker_url)
     emit("live_ucp_worker_discover", http=w_code, version=((w_disc or {}).get("ucp") or {}).get("version") if isinstance(w_disc, dict) else None)
-    h_code, health_api = http_json("GET", f"{LIVE_UCP_API}/health")
+    _log_res("discovery_worker", summarize_discovery(w_disc, w_code), w_code, w_disc)
+    health_url = f"{LIVE_UCP_API}/health"
+    _log_req("merchant_health", "GET", health_url, "Check the live UCP API health endpoint.")
+    h_code, health_api = http_json("GET", health_url)
     emit("live_ucp_api_health", http=h_code, body=health_api if isinstance(health_api, dict) else None)
+    _log_res(
+        "merchant_health",
+        f"Live UCP API health HTTP {h_code}.",
+        h_code,
+        health_api if isinstance(health_api, dict) else {"_payload": health_api},
+    )
 
     # 2) Catalog → pick in-stock SKU
+    catalog_url = f"{LIVE_UCP_API}/api/catalog/search"
+    catalog_body = {"query": "", "limit": 10, "filters": {"availability": "in_stock"}}
+    _log_req("catalog", "POST", catalog_url, "Search the live catalog for an in-stock SKU.", body=catalog_body)
     c_code, catalog = http_json(
         "POST",
-        f"{LIVE_UCP_API}/api/catalog/search",
+        catalog_url,
         headers=_live_ucp_headers(),
-        body={"query": "", "limit": 10, "filters": {"availability": "in_stock"}},
+        body=catalog_body,
     )
     items = (catalog or {}).get("items") if isinstance(catalog, dict) else None
     if not isinstance(items, list):
@@ -578,17 +839,28 @@ def run_live_ucp(args: argparse.Namespace, partner: dict[str, str]) -> int:
         product_name=product_name,
         price=price,
     )
+    _log_res("catalog", summarize_catalog(catalog, c_code), c_code, catalog)
     if c_code != 200 or not sku:
         emit("live_ucp_fail", reason="catalog_or_sku_missing")
+        _note("Stopped after catalog: no in-stock SKU. Gate was not opened. No charge.")
         return 1
 
     # 3) Create checkout
     idem = f"argentine-live-ucp-{int(time.time())}"
+    create_url = f"{LIVE_UCP_API}/api/shopping/checkout-sessions"
+    create_body = {"line_items": [{"item": {"id": sku}, "quantity": 1}]}
+    _log_req(
+        "checkout_create",
+        "POST",
+        create_url,
+        f"Create a live checkout for sku {sku}, quantity 1. Mock payment only.",
+        body=create_body,
+    )
     cr_code, created = http_json(
         "POST",
-        f"{LIVE_UCP_API}/api/shopping/checkout-sessions",
+        create_url,
         headers=_live_ucp_headers(idem),
-        body={"line_items": [{"item": {"id": sku}, "quantity": 1}]},
+        body=create_body,
     )
     checkout_id = created.get("id") if isinstance(created, dict) else None
     instruments = None
@@ -598,7 +870,10 @@ def run_live_ucp(args: argparse.Namespace, partner: dict[str, str]) -> int:
         _assert_mock_only(instruments if isinstance(instruments, list) else [])
     except RuntimeError as exc:
         emit("live_ucp_fail", reason=str(exc))
+        _log_res("checkout_create", str(exc), cr_code, created if isinstance(created, dict) else {})
+        _note(f"{exc} No charge.")
         return 1
+    _log_res("checkout_create", summarize_checkout_created(created, cr_code), cr_code, created)
     emit(
         "live_ucp_create",
         http=cr_code,
@@ -620,6 +895,7 @@ def run_live_ucp(args: argparse.Namespace, partner: dict[str, str]) -> int:
     )
     if cr_code not in {200, 201} or not checkout_id:
         emit("live_ucp_fail", reason="create_failed")
+        _note("Stopped after checkout create failed. No complete was sent. No charge.")
         return 1
 
     # 4) GET with retries (known flaky on CF Worker in-memory Map)
@@ -627,8 +903,16 @@ def run_live_ucp(args: argparse.Namespace, partner: dict[str, str]) -> int:
     g_code = 0
     get_ok = False
     for attempt in range(1, 9):
-        g_code, got = http_json("GET", f"{LIVE_UCP_API}/api/shopping/checkout-sessions/{checkout_id}")
+        get_url = f"{LIVE_UCP_API}/api/shopping/checkout-sessions/{checkout_id}"
+        _log_req(
+            "checkout_get",
+            "GET",
+            get_url,
+            f"Read checkout {checkout_id} (attempt {attempt}). Worker storage is an in-memory map and may 404.",
+        )
+        g_code, got = http_json("GET", get_url)
         emit("live_ucp_get_attempt", attempt=attempt, http=g_code, id=checkout_id)
+        _log_res("checkout_get", summarize_checkout_get(got, g_code, attempt=attempt), g_code, got)
         if g_code == 200 and isinstance(got, dict) and got.get("id") == checkout_id:
             get_ok = True
             break
@@ -645,35 +929,60 @@ def run_live_ucp(args: argparse.Namespace, partner: dict[str, str]) -> int:
     order_id = None
     if get_ok:
         # Select mock instrument only (never card-handler)
+        update_url = f"{LIVE_UCP_API}/api/shopping/checkout-sessions/{checkout_id}"
+        update_body = {
+            "payment": {
+                "selected_instrument_id": "mock-instrument-1",
+                "instruments": [
+                    {
+                        "id": "mock-instrument-1",
+                        "handler_id": LIVE_UCP_MOCK_HANDLER,
+                        "type": "token",
+                        "display_name": "Test Payment",
+                    }
+                ],
+            }
+        }
+        _log_req(
+            "checkout_update",
+            "PUT",
+            update_url,
+            "Select mock-payment-handler only. Card handlers are refused.",
+            body=update_body,
+        )
         put_code, updated = http_json(
             "PUT",
-            f"{LIVE_UCP_API}/api/shopping/checkout-sessions/{checkout_id}",
+            update_url,
             headers=_live_ucp_headers(),
-            body={
-                "payment": {
-                    "selected_instrument_id": "mock-instrument-1",
-                    "instruments": [
-                        {
-                            "id": "mock-instrument-1",
-                            "handler_id": LIVE_UCP_MOCK_HANDLER,
-                            "type": "token",
-                            "display_name": "Test Payment",
-                        }
-                    ],
-                }
-            },
+            body=update_body,
         )
         emit(
             "live_ucp_select_mock",
             http=put_code,
             status=updated.get("status") if isinstance(updated, dict) else None,
         )
+        _log_res(
+            "checkout_update",
+            f"Mock instrument select HTTP {put_code}; status "
+            f"{updated.get('status') if isinstance(updated, dict) else None}. No card handler.",
+            put_code,
+            updated if isinstance(updated, dict) else {},
+        )
         # Complete with success_token only (mock path; fail_token would decline)
+        complete_url = f"{LIVE_UCP_API}/api/shopping/checkout-sessions/{checkout_id}/complete"
+        complete_body = {"payment_data": {"token": "success_token"}}
+        _log_req(
+            "checkout_complete",
+            "POST",
+            complete_url,
+            "Complete with the mock success path only. No card, no AP2, no real charge.",
+            body=complete_body,
+        )
         co_code, completed = http_json(
             "POST",
-            f"{LIVE_UCP_API}/api/shopping/checkout-sessions/{checkout_id}/complete",
+            complete_url,
             headers=_live_ucp_headers(),
-            body={"payment_data": {"token": "success_token"}},
+            body=complete_body,
         )
         complete_http = co_code
         if isinstance(completed, dict):
@@ -688,13 +997,23 @@ def run_live_ucp(args: argparse.Namespace, partner: dict[str, str]) -> int:
             money=False,
             handler=LIVE_UCP_MOCK_HANDLER,
         )
+        _log_res("checkout_complete", summarize_complete(completed, co_code), co_code, completed)
     else:
         # Still attempt complete once to document 404 flaky; never card handler
+        complete_url = f"{LIVE_UCP_API}/api/shopping/checkout-sessions/{checkout_id}/complete"
+        complete_body = {"payment_data": {"token": "success_token"}}
+        _log_req(
+            "checkout_complete",
+            "POST",
+            complete_url,
+            "Get was flaky, so complete is attempted once on the mock path only to record the HTTP result. No card, no AP2.",
+            body=complete_body,
+        )
         co_code, completed = http_json(
             "POST",
-            f"{LIVE_UCP_API}/api/shopping/checkout-sessions/{checkout_id}/complete",
+            complete_url,
             headers=_live_ucp_headers(),
-            body={"payment_data": {"token": "success_token"}},
+            body=complete_body,
         )
         complete_http = co_code
         emit(
@@ -706,6 +1025,7 @@ def run_live_ucp(args: argparse.Namespace, partner: dict[str, str]) -> int:
             note="get flaky → complete almost always 404 on this Worker; create body still proves merchant path",
             money=False,
         )
+        _log_res("checkout_complete", summarize_complete(completed, co_code), co_code, completed)
 
     # 5) Gate CLOSED smoke — do NOT open Railway
     gate_base = partner.get("ARGENTINE_GATE_URL", DEFAULT_GATE).rstrip("/")
@@ -714,6 +1034,7 @@ def run_live_ucp(args: argparse.Namespace, partner: dict[str, str]) -> int:
     token = partner.get("ARGENTINE_CALLER_TOKEN", "")
     if partner.get("ARGENTINE_CALLER_ID") != "partner" or not token:
         emit("refuse", reason="partner credentials missing or wrong id")
+        _note("Refused: partner credentials missing or wrong id. No charge.")
         return 2
 
     gh_code, ghealth = gate_health(gate_base)
@@ -761,6 +1082,11 @@ def run_live_ucp(args: argparse.Namespace, partner: dict[str, str]) -> int:
             "get/complete may be flaky (documented). Live GO = later open window, not this mode."
         ),
     )
+    _note(
+        "Live UCP smoke finished. "
+        f"Catalog sku {sku}, checkout {checkout_id}, get_ok={get_ok}, complete_ok={complete_ok}, "
+        f"gate_ok={gate_ok} (closed-gate check). AP2 was not used. No real charge."
+    )
     return 0 if merchant_ok and gate_ok else 1
 
 
@@ -776,41 +1102,75 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    global _INTERACTION
     args = build_parser().parse_args(argv)
-    partner = load_env_file(args.partner_env)
-    admin = load_env_file(args.admin_env) if args.mode == "abort" else {}
-
+    _INTERACTION = InteractionLog(mode=args.mode, root=ROOT)
+    exit_code = 1
     proc = None
     try:
+        partner = load_env_file(args.partner_env)
+        admin = load_env_file(args.admin_env) if args.mode == "abort" else {}
+
         if args.mode == "live-ucp":
-            return run_live_ucp(args, partner)
+            exit_code = run_live_ucp(args, partner)
+            return exit_code
 
         if args.merchant_url:
             merchant_base = args.merchant_url.rstrip("/")
-            code, _ = http_json("GET", f"{merchant_base}/health")
+            health_url = f"{merchant_base}/health"
+            _log_req("merchant", "GET", health_url, "Use an already running merchant.")
+            code, _ = http_json("GET", health_url)
+            _log_res(
+                "merchant",
+                f"External merchant health HTTP {code} at {merchant_base}.",
+                code,
+                {"url": merchant_base, "money": False},
+            )
             if code != 200:
                 emit("refuse", reason="merchant-url health failed", http=code)
-                return 2
+                _note(f"Refused: merchant health HTTP {code}. No charge.")
+                exit_code = 2
+                return exit_code
             emit("merchant_external", url=merchant_base)
         else:
             proc = start_merchant(args.merchant_host, args.merchant_port)
             merchant_base = f"http://{args.merchant_host}:{args.merchant_port}"
 
         if args.mode == "smoke":
-            return run_smoke(args, partner, merchant_base)
-        if args.mode == "demo":
-            return run_demo(args, partner, merchant_base)
-        if args.mode == "abort":
-            return run_abort(args, partner, admin, merchant_base)
-        return 2
+            exit_code = run_smoke(args, partner, merchant_base)
+        elif args.mode == "demo":
+            exit_code = run_demo(args, partner, merchant_base)
+        elif args.mode == "abort":
+            exit_code = run_abort(args, partner, admin, merchant_base)
+        else:
+            exit_code = 2
+        return exit_code
     except SecretError as exc:
+        exit_code = 2
+        _note(str(exc)[:300])
         emit("error", message=str(exc))
-        return 2
+        return exit_code
     except Exception as exc:  # noqa: BLE001
+        exit_code = 1
+        _note(f"{type(exc).__name__}: {str(exc)[:300]}")
         emit("error", type=type(exc).__name__, message=str(exc)[:300])
-        return 1
+        return exit_code
     finally:
         stop_merchant(proc)
+        if _INTERACTION is not None:
+            try:
+                paths = _INTERACTION.write(exit_code)
+                emit(
+                    "demo_report",
+                    markdown=paths["markdown_latest"],
+                    markdown_archive=paths["markdown"],
+                    json=paths["json_latest"],
+                    interactions=paths["interactions_latest"],
+                    narrative=_INTERACTION.narrative_lines(),
+                    result=_INTERACTION.result_text(exit_code),
+                )
+            except Exception as exc:  # noqa: BLE001
+                emit("demo_report_error", message=str(exc)[:300])
 
 
 if __name__ == "__main__":

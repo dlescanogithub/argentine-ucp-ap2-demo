@@ -44,7 +44,28 @@ python3 orchestrator/run_demo.py demo    # gate must be open
 python3 orchestrator/run_demo.py abort
 ```
 
-Stub serves `/.well-known/ucp`, checkout REST, USD 0, AP2 **lab placeholders** (not verifiable).
+Stub serves `/.well-known/ucp`, a lab catalog at `/ucp/v1/products`, checkout REST, USD 0, AP2 **lab placeholders** (not verifiable).
+
+Local flow: discovery → catalog → create checkout → get → gate → mock complete with AP2 lab mandates (or cancel, on abort / non-GO).
+
+## Demo interaction report
+
+Every `smoke`, `demo`, `abort`, and `live-ucp` run writes a presenter report on its own. No extra flag. Logging does not open the gate or clear the kill switch.
+
+| File | Show this |
+| --- | --- |
+| `reports/latest.md` | Chronological narrative: what the agent found at discovery, catalog, checkout, mock complete, and the AP2 lab step when that run sent one |
+| `reports/latest.json` | Same run as JSON (`timestamp`, `step`, `direction`, `summary`, `status`, `payload_snippet`) |
+| `logs/latest.jsonl` | One interaction entry per line |
+
+```bash
+python3 orchestrator/run_demo.py demo    # gate must be open
+# then open reports/latest.md
+```
+
+Timestamped copies sit beside `latest.*` (`reports/demo-report-<mode>-<utc>.md`, `logs/interactions-<mode>-<utc>.jsonl`). The last stdout event is `demo_report` and includes the same paths plus the narrative lines.
+
+Snippets redact tokens, mandate material, signing keys, Authorization, and contact fields. `live-ucp` does not send AP2 (that merchant has none); the report says so. These directories are gitignored.
 
 ## Requirements
 
