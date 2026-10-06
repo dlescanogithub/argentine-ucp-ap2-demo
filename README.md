@@ -67,6 +67,20 @@ Timestamped copies sit beside `latest.*` (`reports/demo-report-<mode>-<utc>.md`,
 
 Snippets redact tokens, mandate material, signing keys, Authorization, and contact fields. `live-ucp` does not send AP2 (that merchant has none); the report says so. These directories are gitignored.
 
+## Interaction dashboard
+
+Read-only page over those same files. It does not call the merchant or the gate, and it cannot clear the kill switch or send a payment.
+
+```bash
+python3 dashboard/server.py
+# or: ./scripts/dashboard.sh
+# http://127.0.0.1:9872
+```
+
+After `smoke`, `demo`, `abort`, or `live-ucp`, open that URL. The page follows `reports/latest.json` and lists older `reports/demo-report-<mode>-<utc>.json` files (and a matching `logs/interactions-*.jsonl` if the JSON report is missing). Each interaction shows the host and URL, step, summary, HTTP status, time, and an expandable redacted snippet. Filter **UCP**, **AP2**, or **Gate**. **Where it connected** lists the base URLs the bot actually called.
+
+Leave the page open during a demo; it reloads the latest run every few seconds. Snippets are redacted again at display time. Stdlib only.
+
 ## Requirements
 
 - Python 3.12+ (stdlib only)

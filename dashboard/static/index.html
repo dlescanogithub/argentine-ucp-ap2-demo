@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>UCP / AP2 interaction report</title>
+  <style>
+    :root {
+      --bg: #f3efe6;
+      --ink: #1c1915;
+      --muted: #5e574c;
+      --line: #ddd4c4;
+      --card: #fffdf8;
+      --ucp: #1d4f3a;
+      --ucp-bg: #e5f2ea;
+      --ap2: #7a3e16;
+      --ap2-bg: #f8eadb;
+      --gate: #243856;
+      --gate-bg: #e6edf5;
+      --ok: #1d6b3a;
+      --ok-bg: #e5f4ea;
+      --warn: #8a5a12;
+      --warn-bg: #fbf1dc;
+      --bad: #8d2e2e;
+      --bad-bg: #f8e6e4;
+      --shadow: 0 1px 0 rgba(28, 25, 21, 0.04);
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--ink);
+      font: 15px/1.45 "Segoe UI", system-ui, sans-serif;
+    }
+    button, input { font: inherit; color: inherit; }
+    button { cursor: pointer; }
+    code, .mono { font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    header.top {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: flex-end;
+      padding: 22px 28px 16px;
+      border-bottom: 1px solid var(--line);
+      background: #faf7f1;
+    }
+    .eyebrow {
+      margin: 0 0 4px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      font-size: 11px;
+      color: var(--muted);
+    }
+    h1 { margin: 0; font-size: 28px; font-weight: 650; letter-spacing: -0.03em; }
+    .lede { margin: 6px 0 0; color: var(--muted); max-width: 46rem; }
+    .top-actions { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+    .btn {
+      border: 1px solid var(--line);
+      background: var(--card);
+      border-radius: 999px;
+      padding: 7px 12px;
+      box-shadow: var(--shadow);
+    }
+    .btn[aria-pressed="true"], .btn.active {
+      background: var(--ink);
+      color: #faf7f1;
+      border-color: var(--ink);
+    }
+    .stamp { color: var(--muted); font-size: 12px; }
+    .layout {
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      min-height: calc(100vh - 108px);
+    }
+    aside {
+      border-right: 1px solid var(--line);
+      padding: 16px 12px 28px;
+      background: #f7f3eb;
+    }
+    aside h2, h2.section-label {
+      margin: 18px 0 8px;
+      font-size: 12px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      font-weight: 650;
+    }
+    aside h2 { margin-top: 0; }
+    .banner h2 {
+      margin: 0;
+      font-size: 22px;
+      letter-spacing: -0.02em;
+      text-transform: none;
+      color: var(--ink);
+      font-weight: 650;
+    }
+    .run-btn {
+      display: block;
+      width: 100%;
+      text-align: left;
+      border: 1px solid transparent;
+      background: transparent;
+      border-radius: 10px;
+      padding: 10px 10px;
+      margin-bottom: 6px;
+    }
+    .run-btn.selected {
+      background: var(--card);
+      border-color: var(--line);
+      box-shadow: var(--shadow);
+    }
+    .run-btn strong { display: block; font-size: 15px; }
+    .run-meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
+    main { padding: 18px 22px 48px; }
+    .banner, .empty {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 16px 18px;
+      box-shadow: var(--shadow);
+    }
+    .summary-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 18px;
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .summary-grid b { color: var(--ink); font-weight: 650; }
+    .pills { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+    .pill {
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 12px;
+      background: #efe9dc;
+      color: var(--ink);
+    }
+    .pill.yes { background: var(--ok-bg); color: var(--ok); }
+    .pill.no { background: #eeeae3; color: var(--muted); }
+    .pill.money-bad { background: var(--bad-bg); color: var(--bad); }
+    .connections {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 10px;
+      margin: 14px 0;
+    }
+    .host-card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 12px 14px;
+      box-shadow: var(--shadow);
+    }
+    .host-card .label { font-size: 12px; color: var(--muted); }
+    .host-card h3 { margin: 2px 0 8px; font-size: 16px; word-break: break-all; }
+    .endpoint {
+      display: flex;
+      gap: 8px;
+      align-items: baseline;
+      font-size: 13px;
+      margin: 4px 0;
+      word-break: break-all;
+    }
+    .method {
+      flex: 0 0 auto;
+      font-size: 11px;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+      min-width: 3.2rem;
+    }
+    .filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0 12px; }
+    .entry {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-left-width: 4px;
+      border-radius: 12px;
+      padding: 12px 14px;
+      margin-bottom: 8px;
+      box-shadow: var(--shadow);
+    }
+    .entry.ucp { border-left-color: var(--ucp); }
+    .entry.ap2 { border-left-color: var(--ap2); }
+    .entry.gate { border-left-color: var(--gate); }
+    .entry-head {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+    .badge {
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      font-weight: 700;
+    }
+    .badge.ucp { background: var(--ucp-bg); color: var(--ucp); }
+    .badge.ap2 { background: var(--ap2-bg); color: var(--ap2); }
+    .badge.gate { background: var(--gate-bg); color: var(--gate); }
+    .step-name { font-weight: 650; }
+    .direction { color: var(--muted); font-size: 12px; }
+    .time { margin-left: auto; color: var(--muted); font-size: 12px; }
+    .status {
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 12px;
+      font-weight: 700;
+      background: #eeeae3;
+    }
+    .status.ok { background: var(--ok-bg); color: var(--ok); }
+    .status.warn { background: var(--warn-bg); color: var(--warn); }
+    .status.bad { background: var(--bad-bg); color: var(--bad); }
+    .url-line { margin: 0 0 6px; font-size: 13px; word-break: break-all; }
+    .summary { margin: 0; }
+    details { margin-top: 8px; }
+    summary { color: var(--muted); cursor: pointer; }
+    pre {
+      margin: 8px 0 0;
+      padding: 10px 12px;
+      background: #1c1915;
+      color: #f4efe6;
+      border-radius: 8px;
+      overflow: auto;
+      font-size: 12px;
+      line-height: 1.4;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .advertised { color: var(--muted); font-size: 13px; margin-top: 4px; }
+    .hidden { display: none; }
+    footer.note { margin-top: 18px; color: var(--muted); font-size: 12px; }
+    @media (max-width: 860px) {
+      header.top { flex-direction: column; align-items: flex-start; padding: 16px; }
+      .layout { grid-template-columns: 1fr; }
+      aside { border-right: 0; border-bottom: 1px solid var(--line); }
+      .time { margin-left: 0; }
+      main { padding: 14px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="top">
+    <div>
+      <p class="eyebrow">ArGENTine demo</p>
+      <h1>UCP / AP2 interaction report</h1>
+      <p class="lede">Hosts, steps, and redacted snippets from the demo bot. This page only reads local report files. It does not open the gate, clear the kill switch, or send a payment.</p>
+    </div>
+    <div class="top-actions">
+      <span class="stamp" id="updated"></span>
+      <button class="btn" id="follow" type="button" aria-pressed="true">Follow latest</button>
+      <button class="btn" id="refresh" type="button">Refresh</button>
+    </div>
+  </header>
+  <div class="layout">
+    <aside>
+      <h2>Runs</h2>
+      <div id="run-list"></div>
+    </aside>
+    <main id="report"></main>
+  </div>
+  <script>
+    const state = {
+      runs: [],
+      selectedId: null,
+      followLatest: true,
+      filter: "all",
+      run: null,
+      error: "",
+    };
+    let renderKey = "";
+
+    const STEP_LABELS = {
+      discovery: "Discovery",
+      catalog: "Catalog",
+      checkout_create: "Checkout",
+      checkout_complete: "Complete",
+      ap2_mandate: "AP2 mandate",
+    };
+
+    function el(tag, attrs, children) {
+      const node = document.createElement(tag);
+      if (attrs) {
+        Object.keys(attrs).forEach(function (key) {
+          if (key === "class") node.className = attrs[key];
+          else if (key === "title") node.title = attrs[key];
+          else if (key.indexOf("data-") === 0) node.setAttribute(key, attrs[key]);
+          else if (key === "ariaPressed") node.setAttribute("aria-pressed", attrs[key]);
+          else if (key === "type") node.type = attrs[key];
+          else node[key] = attrs[key];
+        });
+      }
+      (children || []).forEach(function (child) {
+        if (child == null) return;
+        node.appendChild(typeof child === "string" ? document.createTextNode(child) : child);
+      });
+      return node;
+    }
+
+    function textTime(iso) {
+      if (!iso) return "—";
+      const match = String(iso).match(/T(\d{2}:\d{2}:\d{2})/);
+      return match ? match[1] + "Z" : String(iso);
+    }
+
+    function shortWhen(iso) {
+      if (!iso) return "";
+      const match = String(iso).match(/(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/);
+      return match ? match[1] + " " + match[2] + "Z" : String(iso);
+    }
+
+    function statusClass(code) {
+      if (code == null) return "";
+      if (code >= 200 && code < 300) return "ok";
+      if (code >= 400 && code < 500) return "warn";
+      if (code >= 500) return "bad";
+      return "";
+    }
+
+    function snippetText(value) {
+      if (value == null) return "";
+      if (typeof value === "string") return value;
+      try {
+        return JSON.stringify(value, null, 2);
+      } catch (err) {
+        return String(value);
+      }
+    }
+
+    function pathOf(url) {
+      try {
+        const parsed = new URL(url);
+        return (parsed.pathname || "/") + (parsed.search || "");
+      } catch (err) {
+        return url;
+      }
+    }
+
+    function counts(entries) {
+      const tally = { all: entries.length, ucp: 0, ap2: 0, gate: 0 };
+      entries.forEach(function (entry) {
+        if (tally[entry.protocol] != null && entry.protocol !== "all") tally[entry.protocol] += 1;
+      });
+      return tally;
+    }
+
+    function latestRun() {
+      return state.runs.find(function (run) { return run.is_latest; }) || state.runs[0] || null;
+    }
+
+    async function fetchJson(url) {
+      const response = await fetch(url, { cache: "no-store" });
+      if (!response.ok) throw new Error(String(response.status));
+      return response.json();
+    }
+
+    async function refresh(force) {
+      try {
+        const payload = await fetchJson("/api/runs");
+        state.runs = payload.runs || [];
+        state.error = "";
+        const latest = latestRun();
+        if (!state.selectedId || (state.followLatest && latest)) {
+          state.selectedId = latest ? latest.id : null;
+        } else if (!state.runs.some(function (run) { return run.id === state.selectedId; })) {
+          state.selectedId = latest ? latest.id : null;
+        }
+        if (state.selectedId) await loadSelected(force);
+        else {
+          state.run = null;
+          paint(true);
+        }
+      } catch (err) {
+        state.error = "The dashboard API did not respond. Start it with python3 dashboard/server.py and refresh.";
+        paint(true);
+      }
+      document.getElementById("updated").textContent = "Updated " + new Date().toISOString().slice(11, 19) + "Z";
+    }
+
+    async function loadSelected(force) {
+      const id = state.selectedId;
+      if (!id) return;
+      try {
+        const run = await fetchJson("/api/runs/" + encodeURIComponent(id));
+        const same = state.run
+          && state.run.id === run.id
+          && state.run.finished_at === run.finished_at
+          && state.run.entry_count === run.entry_count
+          && state.run.result === run.result;
+        state.run = run;
+        state.error = "";
+        paint(!same || force);
+      } catch (err) {
+        state.error = "Could not load that run.";
+        paint(true);
+      }
+    }
+
+    function paint(force) {
+      const key = [
+        state.error,
+        state.filter,
+        state.followLatest,
+        state.selectedId,
+        state.run && state.run.finished_at,
+        state.run && state.run.entry_count,
+        state.run && state.run.result,
+        state.runs.map(function (run) { return run.id + (run.is_latest ? "*" : ""); }).join(","),
+      ].join("|");
+      if (!force && key === renderKey) return;
+      renderKey = key;
+      renderRuns();
+      renderReport();
+      const follow = document.getElementById("follow");
+      follow.setAttribute("aria-pressed", state.followLatest ? "true" : "false");
+      follow.classList.toggle("active", state.followLatest);
+    }
+
+    function renderRuns() {
+      const list = document.getElementById("run-list");
+      list.replaceChildren();
+      if (!state.runs.length) {
+        list.appendChild(el("p", { class: "run-meta" }, ["No reports yet."]));
+        return;
+      }
+      state.runs.forEach(function (run) {
+        const bits = [shortWhen(run.started_at), run.entry_count + " entries"];
+        if (run.is_latest) bits.push("latest");
+        const button = el("button", {
+          class: "run-btn" + (run.id === state.selectedId ? " selected" : ""),
+          type: "button",
+        }, [
+          el("strong", null, [run.mode || "run"]),
+          el("div", { class: "run-meta" }, [bits.filter(Boolean).join(" · ")]),
+        ]);
+        button.addEventListener("click", function () {
+          state.selectedId = run.id;
+          state.followLatest = !!run.is_latest;
+          loadSelected(true);
+        });
+        list.appendChild(button);
+      });
+    }
+
+    function renderReport() {
+      const root = document.getElementById("report");
+      root.replaceChildren();
+      if (state.error) {
+        root.appendChild(el("div", { class: "empty" }, [state.error]));
+        return;
+      }
+      const run = state.run;
+      if (!run) {
+        root.appendChild(el("div", { class: "empty" }, [
+          el("strong", null, ["No demo report yet."]),
+          el("p", null, ["Run python3 orchestrator/run_demo.py smoke (or demo, abort, live-ucp), then refresh. The newest file is reports/latest.json."]),
+        ]));
+        return;
+      }
+
+      const banner = el("section", { class: "banner" });
+      const titleBits = [run.mode || "run"];
+      if (run.is_latest) titleBits.push("latest");
+      banner.appendChild(el("h2", null, [titleBits.join(" · ")]));
+      if (run.result) banner.appendChild(el("p", { class: "summary" }, [run.result]));
+      const facts = el("div", { class: "summary-grid" });
+      [
+        ["Started", run.started_at || "—"],
+        ["Finished", run.finished_at || "—"],
+        ["Exit", run.exit_code == null ? "—" : String(run.exit_code)],
+        ["Money", run.money ? "true" : "false"],
+        ["Source", run.source || ""],
+      ].forEach(function (pair) {
+        facts.appendChild(el("span", null, [pair[0] + " ", el("b", null, [pair[1]])]));
+      });
+      banner.appendChild(facts);
+      const pills = el("div", { class: "pills" });
+      Object.keys(STEP_LABELS).forEach(function (step) {
+        const on = run.protocol_steps && run.protocol_steps[step];
+        pills.appendChild(el("span", { class: "pill " + (on ? "yes" : "no") }, [
+          STEP_LABELS[step] + " " + (on ? "yes" : "no"),
+        ]));
+      });
+      if (run.money) pills.appendChild(el("span", { class: "pill money-bad" }, ["money flag is true"]));
+      banner.appendChild(pills);
+      if (run.ap2_mandate) {
+        banner.appendChild(el("p", { class: "advertised" }, ["AP2: " + run.ap2_mandate]));
+      }
+      root.appendChild(banner);
+
+      const where = el("section");
+      where.appendChild(el("h2", { class: "section-label" }, ["Where it connected"]));
+      const cards = el("div", { class: "connections" });
+      (run.connections || []).forEach(function (conn) {
+        const card = el("article", { class: "host-card" });
+        card.appendChild(el("div", { class: "label" }, [conn.label + " · " + (conn.protocols || []).join(", ")]));
+        card.appendChild(el("h3", { class: "mono", title: conn.origin }, [conn.host || conn.origin]));
+        (conn.endpoints || []).forEach(function (endpoint) {
+          const calls = endpoint.calls > 1 ? " ×" + endpoint.calls : "";
+          card.appendChild(el("div", { class: "endpoint", title: endpoint.url }, [
+            el("span", { class: "method mono" }, [(endpoint.method || "—") + calls]),
+            el("span", { class: "mono" }, [pathOf(endpoint.url)]),
+          ]));
+        });
+        cards.appendChild(card);
+      });
+      if (!(run.connections || []).length) {
+        cards.appendChild(el("p", { class: "advertised" }, ["No request URLs were stored in this run."]));
+      }
+      where.appendChild(cards);
+      if ((run.advertised_endpoints || []).length) {
+        const line = run.advertised_endpoints.map(function (item) { return item.url; }).join(" · ");
+        where.appendChild(el("p", { class: "advertised" }, ["Discovery advertised: " + line]));
+      }
+      root.appendChild(where);
+
+      const entries = run.entries || [];
+      const tally = counts(entries);
+      const filters = el("div", { class: "filters" });
+      [
+        ["all", "All " + tally.all],
+        ["ucp", "UCP " + tally.ucp],
+        ["ap2", "AP2 " + tally.ap2],
+        ["gate", "Gate " + tally.gate],
+      ].forEach(function (pair) {
+        const pressed = state.filter === pair[0];
+        const button = el("button", {
+          class: "btn" + (pressed ? " active" : ""),
+          type: "button",
+          ariaPressed: pressed ? "true" : "false",
+        }, [pair[1]]);
+        button.addEventListener("click", function () {
+          state.filter = pair[0];
+          paint(true);
+        });
+        filters.appendChild(button);
+      });
+      root.appendChild(filters);
+
+      const visible = entries.filter(function (entry) {
+        return state.filter === "all" || entry.protocol === state.filter;
+      });
+      if (!visible.length) {
+        const note = state.filter === "ap2" && run.ap2_mandate
+          ? run.ap2_mandate
+          : "No interactions in this section.";
+        root.appendChild(el("div", { class: "empty" }, [note]));
+      }
+      visible.forEach(function (entry) {
+        root.appendChild(renderEntry(entry));
+      });
+      if (run.truncated) {
+        root.appendChild(el("p", { class: "advertised" }, ["Older entries were omitted from this view."]));
+      }
+      root.appendChild(el("footer", { class: "note" }, [
+        "Snippets are redacted before display. Compare with reports/latest.md during the demo. Prior runs stay in the list while their timestamped files remain under reports/.",
+      ]));
+    }
+
+    function renderEntry(entry) {
+      const card = el("article", { class: "entry " + (entry.protocol || "ucp") });
+      const head = el("div", { class: "entry-head" });
+      head.appendChild(el("span", { class: "badge " + entry.protocol }, [entry.protocol || "ucp"]));
+      head.appendChild(el("span", { class: "step-name" }, [entry.step || "step"]));
+      head.appendChild(el("span", { class: "direction" }, [entry.direction || ""]));
+      const status = entry.status == null ? "—" : String(entry.status);
+      head.appendChild(el("span", { class: "status " + statusClass(entry.status) }, [status]));
+      head.appendChild(el("span", { class: "time mono", title: entry.timestamp || "" }, [textTime(entry.timestamp)]));
+      card.appendChild(head);
+      if (entry.url) {
+        const urlLine = el("p", { class: "url-line mono", title: entry.url });
+        if (entry.method) urlLine.appendChild(el("span", { class: "method" }, [entry.method + " "]));
+        urlLine.appendChild(document.createTextNode(entry.url));
+        card.appendChild(urlLine);
+      }
+      card.appendChild(el("p", { class: "summary" }, [entry.summary || ""]));
+      const details = el("details");
+      details.appendChild(el("summary", null, ["Redacted snippet"]));
+      details.appendChild(el("pre", null, [snippetText(entry.payload_snippet)]));
+      card.appendChild(details);
+      return card;
+    }
+
+    document.getElementById("refresh").addEventListener("click", function () { refresh(true); });
+    document.getElementById("follow").addEventListener("click", function () {
+      state.followLatest = !state.followLatest;
+      if (state.followLatest) {
+        const latest = latestRun();
+        if (latest) state.selectedId = latest.id;
+        loadSelected(true);
+      } else {
+        paint(true);
+      }
+    });
+    refresh(true);
+    setInterval(function () { refresh(false); }, 4000);
+  </script>
+</body>
+</html>
