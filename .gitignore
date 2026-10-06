@@ -9,3 +9,5 @@ var/
 *.env
 .DS_Store
 .evidence/
+logs/
+reports/

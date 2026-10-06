@@ -4,6 +4,7 @@
 Serves:
   GET  /.well-known/ucp
   GET  /platform/profile.json
+  GET  /ucp/v1/products
   POST /ucp/v1/checkout-sessions
   GET  /ucp/v1/checkout-sessions/{id}
   POST /ucp/v1/checkout-sessions/{id}/complete
@@ -110,8 +111,27 @@ def business_profile(base_url: str) -> dict[str, Any]:
             "phase": 1,
             "money": False,
             "sku": "demo-sticker",
+            "catalog": f"{base_url}/ucp/v1/products",
             "note": "Local stub merchant for ArGENTine × UCP × AP2. Not production.",
         },
+    }
+
+
+def product_catalog() -> dict[str, Any]:
+    meta = _load_json(META_PATH)
+    amount = meta.get("amount") or {"currency": "USD", "value": 0}
+    sku = meta.get("sku", "demo-sticker")
+    return {
+        "items": [
+            {
+                "id": sku,
+                "sku": sku,
+                "name": "ArGENTine demo sticker (no charge)",
+                "availability": "in_stock",
+                "price": amount,
+            }
+        ],
+        "_demo": {"money": False, "note": "Lab catalog. No charge."},
     }
 
 
@@ -281,6 +301,8 @@ def make_handler(host: str, port: int):
                 return self._send(200, _load_json(PLATFORM_PROFILE))
             if path == "/health":
                 return self._send(200, {"ok": True, "phase": 1, "money": False, "sessions": len(SESSIONS)})
+            if path == "/ucp/v1/products":
+                return self._send(200, product_catalog())
             if path.startswith("/ucp/v1/checkout-sessions/"):
                 checkout_id = path.split("/ucp/v1/checkout-sessions/", 1)[1]
                 session = get_checkout(checkout_id)
