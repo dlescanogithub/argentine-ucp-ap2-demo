@@ -1,0 +1,12 @@
+{
+  "phase": 1,
+  "format": "lab_placeholder_sd_jwt_shaped",
+  "verifiable": false,
+  "money": false,
+  "vct_checkout": "mandate.checkout.1",
+  "vct_payment": "mandate.payment.1",
+  "handler_id": "demo_ap2_lab",
+  "amount": {"currency": "USD", "value": 0},
+  "sku": "demo-sticker",
+  "note": "Replace with lab-signed SD-JWT in phase 2 only if Diego asks. Never use production keys."
+}
