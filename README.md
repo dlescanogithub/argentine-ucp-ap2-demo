@@ -1,3 +1,5 @@
+> **Archived (2026-10-18).** This repository is archived and read-only. It is kept as a historical record and is no longer maintained. A rewritten version with synthetic data, governance and business-strategy documentation is planned; it will be linked here when it exists.
+
 # argentine-ucp-ap2-demo
 
 Local **UCP** stub + **live hemanth UCP** smoke + **AP2** lab fixtures + orchestrator against the live **ArGENTine** HITL gate on Railway.
