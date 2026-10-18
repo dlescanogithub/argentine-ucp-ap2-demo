@@ -7,6 +7,8 @@ var/
 *.log
 .env
 *.env
+.env.partner
+.env.admin
 .DS_Store
 .evidence/
 logs/

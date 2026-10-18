@@ -84,9 +84,11 @@ Leave the page open during a demo; it reloads the latest run every few seconds. 
 ## Requirements
 
 - Python 3.12+ (stdlib only)
-- Secrets (never commit / never print):
-  - `/home/box/secrets/argentine-partner-caller.env`
-  - `/home/box/secrets/argentine-admin.env` — **abort** only
+- Secrets (never commit / never print). You supply your own values in local, untracked env files:
+  - Partner caller: `.env.partner`, or set `PARTNER_CALLER_ENV_FILE` to another path
+  - Admin, **abort** only: `.env.admin`, or set `ADMIN_ENV_FILE` to another path
+
+`--partner-env` and `--admin-env` override those locations for a single run. Do not commit the files.
 
 ## Secrets
 
