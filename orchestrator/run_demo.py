@@ -11,9 +11,9 @@ Modes:
               Gate stays CLOSED for this smoke (expect 503 diego_off). No Railway open.
               No real money (mock-payment-handler / success_token only). No AP2 claim.
 
-Secrets (never printed):
-  /home/box/secrets/argentine-partner-caller.env
-  /home/box/secrets/argentine-admin.env
+Secrets (never printed). Supply your own values in local env files:
+  PARTNER_CALLER_ENV_FILE, or .env.partner when that variable is unset
+  ADMIN_ENV_FILE, or .env.admin when that variable is unset
 
 Does not modify argentine-a2a. Does not deploy this stub to Railway.
 
@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -64,8 +65,16 @@ except ImportError:  # `python -m orchestrator.run_demo`
     )
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_PARTNER_ENV = Path("/home/box/secrets/argentine-partner-caller.env")
-DEFAULT_ADMIN_ENV = Path("/home/box/secrets/argentine-admin.env")
+
+
+def _env_file_from_environ(var_name: str, fallback_name: str) -> Path:
+    """Local env-file path. An environment variable overrides the repo-root default."""
+    raw = os.environ.get(var_name, "").strip()
+    return Path(raw) if raw else (ROOT / fallback_name)
+
+
+DEFAULT_PARTNER_ENV = _env_file_from_environ("PARTNER_CALLER_ENV_FILE", ".env.partner")
+DEFAULT_ADMIN_ENV = _env_file_from_environ("ADMIN_ENV_FILE", ".env.admin")
 DEFAULT_GATE = "https://argentine-a2a-production.up.railway.app"
 AP2_DIR = ROOT / "fixtures" / "ap2"
 
@@ -1096,8 +1105,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--merchant-host", default="127.0.0.1")
     p.add_argument("--merchant-port", type=int, default=9871)
     p.add_argument("--merchant-url", default="", help="Use existing merchant; do not spawn")
-    p.add_argument("--partner-env", type=Path, default=DEFAULT_PARTNER_ENV)
-    p.add_argument("--admin-env", type=Path, default=DEFAULT_ADMIN_ENV)
+    p.add_argument(
+        "--partner-env",
+        type=Path,
+        default=DEFAULT_PARTNER_ENV,
+        help="Partner caller env file (default: $PARTNER_CALLER_ENV_FILE or .env.partner)",
+    )
+    p.add_argument(
+        "--admin-env",
+        type=Path,
+        default=DEFAULT_ADMIN_ENV,
+        help="Admin env file, abort only (default: $ADMIN_ENV_FILE or .env.admin)",
+    )
     return p
 
 
